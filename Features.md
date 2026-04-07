@@ -424,11 +424,87 @@ doc = fitz.open("file.pdf")
 pdf_text = "\n".join(page.get_text() for page in doc)
 ```
 
-**UI 方針（App化時）：**
-- サイドパネルにモデル選択ドロップダウン（オンライン/ローカル切替）
+**UI レイアウト（App化時）：**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  左サイドバー（ファイルツリー）│  中央（PDF表示）  │  右パネル（AIチャット）│
+│                              │                 │                      │
+│  📁 フォルダ                  │  [PDF ページ]    │ ┌──モデル選択──────┐  │
+│   📄 a.pdf ←──── @引用 ──────┼─────────────────┼─│ Claude ▼  ⚙設定  │  │
+│   📄 b.pdf                   │                 │ └──────────────────┘  │
+│                              │                 │                      │
+│                              │                 │ 📎 a.pdf（p.3 参照）   │
+│                              │                 │                      │
+│                              │                 │ AI: この页の内容は    │
+│                              │                 │ 〇〇について...▋      │
+│                              │                 │                      │
+│                              │                 │ You: 要約して         │
+│                              │                 │ ┌──────────────────┐  │
+│                              │                 │ │ @ メッセージ入力  │  │
+│                              │                 │ └──────────[送信]─┘  │
+└──────────────────────────────┴─────────────────┴──────────────────────┘
+```
+
+**ファイル読み込み方式（4種）：**
+
+| 方式 | トリガー | 説明 |
+|------|---------|------|
+| 現在ページ自動注入 | PDF を開いたとき | 表示中ページのテキストを自動でコンテキストに追加 |
+| @ファイル参照 | チャット入力で `@filename.pdf` と入力 | ファイル全体または指定ページ範囲を読み込み |
+| 右クリック送信 | サムネイル右クリック →「AI に送る」 | 選択ページ範囲をチャットコンテキストに追加 |
+| 画像モード切替 | チャットパネルのトグル | テキスト抽出の代わりにページ画像を送信（スキャン PDF 向け） |
+
+**チャット UI 仕様：**
+
+- **ストリーミング出力**：タイピングエフェクトでリアルタイム表示（`anthropic` SDK の `.stream()` 使用）
+- **多ターン会話**：会話履歴を保持して文脈を維持（最大トークン超過時は古い履歴を自動削減）
+- **Markdown レンダリング**：AI 回答内の表・コードブロック・リストを正しく表示
+- **引用ジャンプ**：AI が「3ページ目」等に言及した場合、クリックでそのページへ移動
+- **コンテキスト表示**：チャット上部に現在参照中のファイル名・ページ範囲をバッジ表示
+- **会話リセット**：「新しい会話」ボタンで履歴クリア・コンテキスト解除
+
+**モデル設定：**
+
+- モデル選択ドロップダウン（オンライン / ローカル切替）
 - API キーは設定画面で入力・アプリデータフォルダに暗号化保存
 - Ollama / LM Studio はエンドポイント URL を設定画面でカスタマイズ可能
-- 現在開いている PDF ページのテキストをコンテキストとしてチャットに自動挿入
+
+**Python 実装方針（ストリーミング）：**
+
+```python
+# pywebview JS ブリッジ経由でフロントエンドに逐次送信
+class API:
+    def ask_ai(self, question, file_paths, page_range=None):
+        context = self._extract_context(file_paths, page_range)
+        client = anthropic.Anthropic(api_key=self.api_key)
+        with client.messages.stream(
+            model="claude-opus-4-6",
+            max_tokens=4096,
+            messages=self.history + [{"role": "user", "content": context + "\n\n" + question}]
+        ) as stream:
+            for text in stream.text_stream:
+                window.evaluate_js(f'appendChatChunk({json.dumps(text)})')
+        self.history.append({"role": "user", "content": question})
+        self.history.append({"role": "assistant", "content": stream.get_final_text()})
+
+    def _extract_context(self, file_paths, page_range):
+        import fitz
+        parts = []
+        for path in file_paths:
+            doc = fitz.open(path)
+            pages = range(*page_range) if page_range else range(len(doc))
+            parts.append("\n".join(doc[i].get_text() for i in pages))
+        return "\n\n---\n\n".join(parts)
+```
+
+```javascript
+// フロントエンド：チャンク受信してリアルタイム追記
+function appendChatChunk(text) {
+    currentBubble.textContent += text;
+    chatPanel.scrollTop = chatPanel.scrollHeight;
+}
+```
 
 ---
 
